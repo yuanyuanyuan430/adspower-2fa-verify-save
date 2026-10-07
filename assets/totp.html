@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>本地 2FA 验证码</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px 16px; background: #f4f6f8; color: #17212b; font: 16px/1.6 system-ui, sans-serif; }
+  main { max-width: 620px; margin: auto; padding: 28px; border: 1px solid #d5dce3; border-radius: 16px; background: white; container-type: inline-size; }
+  h1 { margin: 0 0 8px; font-size: 28px; line-height: 1.3; }
+  p { margin: 8px 0 20px; color: #465363; }
+  label { display: block; margin: 16px 0 6px; font-weight: 600; }
+  input, select, button { font: inherit; border-radius: 8px; min-height: 44px; }
+  input:not([type=checkbox]), select { width: 100%; border: 1px solid #7a8797; padding: 10px; background: white; color: #17212b; }
+  input[type=checkbox] { width: 18px; height: 18px; min-height: 0; }
+  .reveal { display: flex; align-items: center; gap: 8px; font-weight: 400; margin-top: 8px; }
+  details { margin: 16px 0; }
+  summary { cursor: pointer; padding: 8px 0; }
+  .settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+  button { cursor: pointer; padding: 10px 18px; border: 1px solid #7a8797; background: #fff; color: #17212b; }
+  button[type=submit] { background: #174ea6; border-color: #174ea6; color: white; }
+  button:disabled { cursor: default; opacity: .55; }
+  :focus-visible { outline: 3px solid #174ea6; outline-offset: 3px; }
+  .result { margin-top: 24px; border-top: 1px solid #d5dce3; padding-top: 20px; text-align: center; }
+  output { display: block; font: 600 clamp(16px, 10cqw, 46px)/1.4 ui-monospace, monospace; letter-spacing: .08em; user-select: all; }
+  #status { min-height: 26px; margin: 14px 0 0; overflow-wrap: anywhere; }
+  .note { font-size: 14px; margin-bottom: 0; }
+  @media (max-width: 420px) { main { padding: 18px; } .settings { grid-template-columns: 1fr; gap: 0; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>本地 2FA 验证码</h1>
+  <p>将这个文件复制到其他电脑，用浏览器打开即可。密钥只在当前页面使用，不上传、不保存。</p>
+  <form id="form" autocomplete="off">
+    <label for="secret">2FA 密钥或 otpauth 链接</label>
+    <input id="secret" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" maxlength="4096" required aria-describedby="hint status">
+    <label class="reveal"><input id="reveal" type="checkbox">显示密钥</label>
+    <p id="hint" class="note">粘贴平台给出的 Base32 密钥。默认适用于 Google：SHA-1、6 位、30 秒。</p>
+    <details>
+      <summary>验证码参数</summary>
+      <div class="settings">
+        <div><label for="algorithm">算法</label><select id="algorithm"><option>SHA1</option><option>SHA256</option><option>SHA512</option></select></div>
+        <div><label for="digits">位数</label><select id="digits"><option>6</option><option>8</option></select></div>
+        <div><label for="period">周期（秒）</label><input id="period" type="number" min="1" max="86400" step="1" value="30" required></div>
+      </div>
+    </details>
+    <div class="actions"><button type="submit">生成验证码</button><button id="clear" type="button">清空</button></div>
+  </form>
+  <div class="result">
+    <output id="code" aria-label="当前验证码" tabindex="0">------</output>
+    <div id="countdown">等待输入密钥</div>
+    <button id="copy" type="button" disabled>复制验证码</button>
+  </div>
+  <p id="status" role="status" aria-live="polite"></p>
+  <p class="note">生成验证码不等于平台验证成功。将验证码提交给 Google；确认成功后，再把原始密钥保存到对应 AdsPower 环境。请确保电脑时间准确。</p>
+</main>
+<script>
+"use strict";
+function decodeBase32(raw) {
+  const secret = raw.replace(/\s/g, "").toUpperCase();
+  const data = secret.replace(/=+$/, "");
+  const padding = { 0: 0, 2: 6, 4: 4, 5: 3, 7: 1 }[data.length % 8];
+  if (!/^[A-Z2-7]+={0,6}$/.test(secret) || data.length > 1024 || padding === undefined ||
+      (secret.includes("=") && secret.length - data.length !== padding)) {
+    throw new Error("密钥格式不正确。请重新复制完整的 Base32 密钥，勿粘贴六位验证码。");
+  }
+  let buffer = 0, bits = 0;
+  const bytes = [];
+  for (const char of data) {
+    buffer = (buffer << 5) | "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(char);
+    bits += 5;
+    if (bits >= 8) { bits -= 8; bytes.push((buffer >>> bits) & 255); }
+    buffer &= (1 << bits) - 1;
+  }
+  if (bits && buffer !== 0) throw new Error("密钥末尾不完整。请从原平台重新复制。");
+  if (bytes.length < 10) throw new Error("密钥过短。请确认粘贴的是密钥，而不是验证码。");
+  return { secret: data, bytes: new Uint8Array(bytes) };
+}
+function parseConfig(raw, algorithm = "SHA1", digits = "6", period = "30") {
+  let secret = raw.trim();
+  if (/^otpauth:/i.test(secret)) {
+    let uri;
+    try { uri = new URL(secret); } catch { throw new Error("otpauth 链接无效。请重新复制。"); }
+    if (uri.protocol !== "otpauth:" || uri.host !== "totp" || uri.username || uri.password) {
+      throw new Error("只支持基于时间的 otpauth://totp 链接。");
+    }
+    for (const name of ["secret", "algorithm", "digits", "period"]) {
+      if (uri.searchParams.getAll(name).length > 1) throw new Error("链接有重复参数。请从原平台重新复制。");
+    }
+    secret = uri.searchParams.get("secret") || "";
+    algorithm = uri.searchParams.get("algorithm") ?? "SHA1";
+    digits = uri.searchParams.get("digits") ?? "6";
+    period = uri.searchParams.get("period") ?? "30";
+  }
+  algorithm = algorithm.toUpperCase();
+  if (!["SHA1", "SHA256", "SHA512"].includes(algorithm) || !["6", "8"].includes(String(digits)) ||
+      !/^\d+$/.test(String(period)) || Number(period) < 1 || Number(period) > 86400) {
+    throw new Error("参数不支持。使用 SHA1/SHA256/SHA512、6 或 8 位及 1–86400 秒周期。");
+  }
+  return { ...decodeBase32(secret), algorithm, digits: Number(digits), period: Number(period) };
+}
+async function importTotpKey(config) {
+  if (!globalThis.crypto?.subtle) throw new Error("此浏览器未提供本地加密功能。请用最新版 Chrome、Edge、Firefox 或 Safari 打开该文件。");
+  return crypto.subtle.importKey("raw", config.bytes, { name: "HMAC", hash: config.algorithm.replace("SHA", "SHA-") }, false, ["sign"]);
+}
+async function generateTotp(key, config, seconds = Date.now() / 1000) {
+  if (!Number.isFinite(seconds) || seconds < 0) throw new Error("设备时间无效。请检查系统时间。");
+  const counter = new ArrayBuffer(8);
+  new DataView(counter).setBigUint64(0, BigInt(Math.floor(seconds / config.period)));
+  const hash = new Uint8Array(await crypto.subtle.sign("HMAC", key, counter));
+  const offset = hash[hash.length - 1] & 15;
+  const value = new DataView(hash.buffer).getUint32(offset) & 0x7fffffff;
+  return String(value % (10 ** config.digits)).padStart(config.digits, "0");
+}
+// UI
+const ui = Object.fromEntries(["form", "secret", "reveal", "algorithm", "digits", "period", "clear", "code", "countdown", "copy", "status"].map(id => [id, document.getElementById(id)]));
+let revision = 0, timer, active;
+function resetResult() {
+  revision++; clearInterval(timer); active = undefined;
+  ui.secret.removeAttribute("aria-invalid");
+  ui.code.textContent = "------"; ui.countdown.textContent = "等待输入密钥";
+  ui.copy.disabled = true; ui.status.textContent = "";
+}
+function clearAll() { resetResult(); ui.form.reset(); ui.secret.type = "password"; }
+ui.secret.addEventListener("input", resetResult);
+for (const id of ["algorithm", "digits", "period"]) ui[id].addEventListener("input", resetResult);
+ui.reveal.addEventListener("change", () => { ui.secret.type = ui.reveal.checked ? "text" : "password"; });
+ui.clear.addEventListener("click", () => { clearAll(); ui.secret.focus(); });
+window.addEventListener("pagehide", clearAll);
+async function tick() {
+  if (!active) return;
+  const { key, config, id } = active;
+  const seconds = Date.now() / 1000, counter = Math.floor(seconds / config.period);
+  ui.countdown.textContent = `${config.period - Math.floor(seconds) % config.period} 秒后更新 · ${config.algorithm} / ${config.digits} 位`;
+  if (counter === active.counter) return;
+  ui.copy.disabled = true; ui.code.textContent = "------";
+  try {
+    const code = await generateTotp(key, config, seconds);
+    if (id !== revision || counter !== Math.floor(Date.now() / 1000 / config.period)) return;
+    active.counter = counter; ui.code.textContent = code; ui.copy.disabled = false;
+  } catch { if (id === revision) { resetResult(); ui.status.textContent = "生成失败。请重新生成，或更换支持本地加密的浏览器。"; } }
+}
+ui.form.addEventListener("submit", async event => {
+  event.preventDefault(); resetResult(); const id = revision;
+  ui.status.textContent = "正在生成…";
+  try {
+    const config = parseConfig(ui.secret.value, ui.algorithm.value, ui.digits.value, ui.period.value);
+    const key = await importTotpKey(config);
+    if (id !== revision) return;
+    ui.algorithm.value = config.algorithm; ui.digits.value = String(config.digits); ui.period.value = String(config.period);
+    active = { key, config, id }; await tick();
+    if (id !== revision) return;
+    ui.status.textContent = "验证码已生成。请提交给平台验证。"; timer = setInterval(tick, 250);
+  } catch (error) { if (id === revision) { resetResult(); ui.status.textContent = error.message; ui.secret.setAttribute("aria-invalid", "true"); ui.secret.focus(); } }
+});
+ui.copy.addEventListener("click", async () => {
+  if (!active || ui.copy.disabled) return;
+  const id = revision;
+  if (active.counter !== Math.floor(Date.now() / 1000 / active.config.period)) { await tick(); if (id === revision) ui.status.textContent = "验证码已更新，请再点一次复制。"; return; }
+  try { await navigator.clipboard.writeText(ui.code.textContent); if (id === revision) ui.status.textContent = "已复制验证码。请及时粘贴。"; }
+  catch { if (id === revision) ui.status.textContent = "自动复制受限。请选中验证码并按 Ctrl+C 或 Cmd+C。"; }
+});
+</script>
+</body>
+</html>

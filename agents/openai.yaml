@@ -1,0 +1,4 @@
+interface:
+  display_name: "AdsPower 创建环境与 2FA 自动验证"
+  short_description: "创建环境并验收登录，登录后需验证标正常；每 IP 五账号，2FA 保存单独核对"
+  default_prompt: "使用 $adspower-2fa-verify-save，创建或继续指定 AdsPower 环境，先按请求区分登录验收与完整2FA绑定；登录后额外验证标正常，未登录先排查流程。完整绑定须Google接受、同一密钥保存和完整读回后才算完成。"

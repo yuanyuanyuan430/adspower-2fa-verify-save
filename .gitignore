@@ -1,0 +1,8 @@
+.agy-staff/
+.DS_Store
+.env
+.env.*
+work/
+outputs/
+*.log
+node_modules/
